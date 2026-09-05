@@ -11,30 +11,63 @@ on:
     # 12PM UTC -> 4AM Pacific
     - cron: '0 12 * * *'
   workflow_dispatch:
+    inputs:
+      leg:
+        description: "baseline (uninstrumented) or instrumented (under chalk/curiosity)"
+        type: choice
+        options: [instrumented, baseline]
+        default: instrumented
+      profile:
+        description: "CrashOverride chalk profile"
+        type: string
+        default: curiosity-tests-racecar
+      racecar_run:
+        description: "racecar correlation token, echoed into the run name"
+        type: string
+        default: ""
 
 permissions:
   contents: read
+  id-token: write
 
 concurrency:
   # If in a PR, use the ref (refs/pull/<num>) so outdated PR runs are cancelled.
   # Otherwise, run_id is unique so all other events will never be cancelled.
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}-${{ inputs.leg || 'push' }}-${{ inputs.racecar_run }}
+  cancel-in-progress: false
+
+env:
+  # The one variable that separates the arms: on baseline, action-checkout
+  # skips its Set up Chalk step entirely.
+  CHALK_ON: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
+
+run-name: "CI ${{ inputs.leg || 'push' }} ${{ inputs.racecar_run }}"
 
 jobs:
   setup-matrix:
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-latest
     if: github.repository == 'DefinitelyTyped/DefinitelyTyped'
 
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
 
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
         with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
           # Need this to be able to inquire about origin/master
           filter: blob:none # https://github.blog/2020-12-21-get-up-to-speed-with-partial-clone-and-shallow-clone/
           fetch-depth: 0 # Default is 1; need to set to 0 to get the benefits of blob:none.
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
@@ -62,11 +95,22 @@ jobs:
       fail-fast: false
 
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
         with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
           # Need this to be able to inquire about origin/master
           filter: blob:none # https://github.blog/2020-12-21-get-up-to-speed-with-partial-clone-and-shallow-clone/
           fetch-depth: 0 # Default is 1; need to set to 0 to get the benefits of blob:none.
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
@@ -125,14 +169,26 @@ jobs:
         if: ${{ github.event_name == 'pull_request' }}
 
   dangerbot:
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-latest
     if: github.repository == 'DefinitelyTyped/DefinitelyTyped' && github.event_name == 'pull_request'
 
     needs:
       - test
 
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - uses: ./.github/actions/setup-for-scripts
 
       - name: Get suggestions dir
@@ -158,11 +214,23 @@ jobs:
           DANGER_GITHUB_API_TOKEN=$TOKEN pnpm danger ci || $( exit 0 )
 
   scripts:
-    runs-on: ubuntu-slim
+    runs-on: ubuntu-latest
     if: github.repository == 'DefinitelyTyped/DefinitelyTyped'
 
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Checkout code
+        uses: crashappsec/action-checkout@main
+        with:
+          chalk: ${{ env.CHALK_ON }}
+          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+          observables_continue_on_error: false
+          lfs: false
+      - name: Assert instrumentation is live
+        if: env.CHALK_ON == 'true'
+        run: |
+          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
+          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+
       - uses: ./.github/actions/setup-for-scripts
 
       - run: pnpm tsc -p ./scripts
