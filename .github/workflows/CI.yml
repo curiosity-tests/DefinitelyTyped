@@ -33,13 +33,13 @@ permissions:
 concurrency:
   # If in a PR, use the ref (refs/pull/<num>) so outdated PR runs are cancelled.
   # Otherwise, run_id is unique so all other events will never be cancelled.
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}-${{ inputs.leg || 'push' }}-${{ inputs.racecar_run }}
+  group: ${{ github.workflow }}-${{ 'push' == 'pull_request' && github.ref || github.run_id }}-${{ inputs.leg || 'push' }}-${{ inputs.racecar_run }}
   cancel-in-progress: false
 
 env:
   # The one variable that separates the arms: on baseline, action-checkout
   # skips its Set up Chalk step entirely.
-  CHALK_ON: ${{ github.event_name == 'workflow_dispatch' && inputs.leg != 'baseline' }}
+  CHALK_ON: ${{ inputs.leg == 'instrumented' }}
 
 run-name: "CI ${{ inputs.leg || 'push' }} ${{ inputs.racecar_run }}"
 
@@ -76,7 +76,7 @@ jobs:
 
       - id: matrix
         run: |
-          if [ "${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}" == "true" ]; then
+          if [ "${{ 'push' == 'schedule' || 'push' == 'workflow_dispatch' }}" == "true" ]; then
             TESTS=all
           else
             TESTS=$(pnpm ls --depth -1 --parseable --filter '...@types/**[HEAD^1]' | wc -)
@@ -139,24 +139,24 @@ jobs:
 
       - run: ./scripts/pnpm-install.sh
         name: pnpm install (filtered)
-        if: ${{ !(github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+        if: ${{ !('push' == 'schedule' || 'push' == 'workflow_dispatch') }}
 
       - run: pnpm install
         name: pnpm install
-        if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+        if: ${{ 'push' == 'schedule' || 'push' == 'workflow_dispatch' }}
 
       - run: pnpm ls
 
       - run: pnpm run test-all --diffBase HEAD^1 --shardCount ${{ matrix.shardCount }} --shardId ${{ matrix.shardId }}
-        if: ${{ !(github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+        if: ${{ !('push' == 'schedule' || 'push' == 'workflow_dispatch') }}
 
       - run: pnpm run test-all --selection all --shardCount ${{ matrix.shardCount }} --shardId ${{ matrix.shardId }}
-        if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+        if: ${{ 'push' == 'schedule' || 'push' == 'workflow_dispatch' }}
 
       - name: Get suggestions dir
         id: suggestions-dir
         run: echo "path=$(node ./scripts/get-suggestions-dir.js)" >> "$GITHUB_OUTPUT"
-        if: ${{ github.event_name == 'pull_request' }}
+        if: ${{ 'push' == 'pull_request' }}
 
       - name: Upload suggestions
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -166,11 +166,11 @@ jobs:
           include-hidden-files: true
           path: ${{ steps.suggestions-dir.outputs.path }}
           retention-days: 1
-        if: ${{ github.event_name == 'pull_request' }}
+        if: ${{ 'push' == 'pull_request' }}
 
   dangerbot:
     runs-on: ubuntu-latest
-    if: github.repository == 'curiosity-tests/DefinitelyTyped' && github.event_name == 'pull_request'
+    if: github.repository == 'curiosity-tests/DefinitelyTyped' && 'push' == 'pull_request'
 
     needs:
       - test
