@@ -46,7 +46,7 @@ run-name: "CI ${{ inputs.leg || 'push' }} ${{ inputs.racecar_run }}"
 jobs:
   setup-matrix:
     runs-on: ubuntu-latest
-    if: github.repository == 'curiosity-tests/DefinitelyTyped'
+    if: github.repository == 'DefinitelyTyped/DefinitelyTyped'
 
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
@@ -87,7 +87,7 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
-    if: github.repository == 'curiosity-tests/DefinitelyTyped'
+    if: github.repository == 'DefinitelyTyped/DefinitelyTyped'
     needs: setup-matrix
 
     strategy:
@@ -170,7 +170,7 @@ jobs:
 
   dangerbot:
     runs-on: ubuntu-latest
-    if: github.repository == 'curiosity-tests/DefinitelyTyped' && 'push' == 'pull_request'
+    if: github.repository == 'DefinitelyTyped/DefinitelyTyped' && 'push' == 'pull_request'
 
     needs:
       - test
@@ -215,7 +215,7 @@ jobs:
 
   scripts:
     runs-on: ubuntu-latest
-    if: github.repository == 'curiosity-tests/DefinitelyTyped'
+    if: github.repository == 'DefinitelyTyped/DefinitelyTyped'
 
     steps:
       - name: Checkout code
