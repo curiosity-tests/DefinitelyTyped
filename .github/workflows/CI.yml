@@ -46,7 +46,11 @@ run-name: "CI ${{ inputs.leg || 'push' }} ${{ inputs.racecar_run }}"
 jobs:
   setup-matrix:
     runs-on: ubuntu-latest
-    if: github.repository == 'DefinitelyTyped/DefinitelyTyped'
+    # racecar: the upstream guard pins this job to the canonical repo, so on a
+    # fork it skips and the run reports success having executed nothing. Our
+    # fork is added as an ADDITIONAL allowed repo -- the upstream clause is
+    # left intact, and nothing here publishes, deploys, pushes or uses secrets.
+    if: github.repository == 'DefinitelyTyped/DefinitelyTyped' || github.repository == 'curiosity-tests/DefinitelyTyped'
 
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
@@ -87,7 +91,11 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
-    if: github.repository == 'DefinitelyTyped/DefinitelyTyped'
+    # racecar: the upstream guard pins this job to the canonical repo, so on a
+    # fork it skips and the run reports success having executed nothing. Our
+    # fork is added as an ADDITIONAL allowed repo -- the upstream clause is
+    # left intact, and nothing here publishes, deploys, pushes or uses secrets.
+    if: github.repository == 'DefinitelyTyped/DefinitelyTyped' || github.repository == 'curiosity-tests/DefinitelyTyped'
     needs: setup-matrix
 
     strategy:
@@ -215,7 +223,11 @@ jobs:
 
   scripts:
     runs-on: ubuntu-latest
-    if: github.repository == 'DefinitelyTyped/DefinitelyTyped'
+    # racecar: the upstream guard pins this job to the canonical repo, so on a
+    # fork it skips and the run reports success having executed nothing. Our
+    # fork is added as an ADDITIONAL allowed repo -- the upstream clause is
+    # left intact, and nothing here publishes, deploys, pushes or uses secrets.
+    if: github.repository == 'DefinitelyTyped/DefinitelyTyped' || github.repository == 'curiosity-tests/DefinitelyTyped'
 
     steps:
       - name: Checkout code
