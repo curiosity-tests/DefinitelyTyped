@@ -80,7 +80,17 @@ jobs:
 
       - id: matrix
         run: |
-          if [ "${{ 'push' == 'schedule' || 'push' == 'workflow_dispatch' }}" == "true" ]; then
+          # racecar: harness defect #7. Frozen to 'push' both comparisons were
+          # FALSE, so this took the else branch: `pnpm ls --filter '...@types/**[HEAD^1]'`
+          # counts the @types packages our own workflow commit touched, i.e. ZERO,
+          # get-ci-matrix clamps that to shardCount=1, and `test` then reported
+          # success having type-checked nothing. Restoring the upstream expression
+          # takes the TESTS=all branch (shardCount=16). Per protocol 7b the only
+          # things this fold gated are `pnpm install` and `test-all` -- nothing
+          # outward. The two `'push' == 'pull_request'` folds in the test job are
+          # deliberately LEFT folded: they are FALSE either way under
+          # workflow_dispatch and need a pull_request payload we do not have.
+          if [ "${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}" == "true" ]; then
             TESTS=all
           else
             TESTS=$(pnpm ls --depth -1 --parseable --filter '...@types/**[HEAD^1]' | wc -)
@@ -147,19 +157,19 @@ jobs:
 
       - run: ./scripts/pnpm-install.sh
         name: pnpm install (filtered)
-        if: ${{ !('push' == 'schedule' || 'push' == 'workflow_dispatch') }}
+        if: ${{ !(github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
 
       - run: pnpm install
         name: pnpm install
-        if: ${{ 'push' == 'schedule' || 'push' == 'workflow_dispatch' }}
+        if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
 
       - run: pnpm ls
 
       - run: pnpm run test-all --diffBase HEAD^1 --shardCount ${{ matrix.shardCount }} --shardId ${{ matrix.shardId }}
-        if: ${{ !('push' == 'schedule' || 'push' == 'workflow_dispatch') }}
+        if: ${{ !(github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
 
       - run: pnpm run test-all --selection all --shardCount ${{ matrix.shardCount }} --shardId ${{ matrix.shardId }}
-        if: ${{ 'push' == 'schedule' || 'push' == 'workflow_dispatch' }}
+        if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
 
       - name: Get suggestions dir
         id: suggestions-dir
