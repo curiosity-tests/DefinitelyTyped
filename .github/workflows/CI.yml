@@ -3,13 +3,13 @@ name: CI
 on:
   push:
     branches:
-      - master
+    - master
   pull_request:
     branches:
-      - master
+    - master
   schedule:
     # 12PM UTC -> 4AM Pacific
-    - cron: '0 12 * * *'
+  - cron: '0 12 * * *'
   workflow_dispatch:
     inputs:
       leg:
@@ -56,49 +56,120 @@ jobs:
       matrix: ${{ steps.matrix.outputs.matrix }}
 
     steps:
-      - name: Checkout code
-        uses: crashappsec/action-checkout@main
-        with:
-          chalk: ${{ env.CHALK_ON }}
-          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
-          observables_continue_on_error: false
-          lfs: false
+    - name: Checkout code
+      uses: crashappsec/action-checkout@main
+      with:
+        chalk: ${{ env.CHALK_ON }}
+        profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+        observables_continue_on_error: false
+        lfs: false
           # Need this to be able to inquire about origin/master
-          filter: blob:none # https://github.blog/2020-12-21-get-up-to-speed-with-partial-clone-and-shallow-clone/
-          fetch-depth: 0 # Default is 1; need to set to 0 to get the benefits of blob:none.
-      - name: Assert instrumentation is live
-        if: env.CHALK_ON == 'true'
-        run: |
-          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
-          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+        filter: blob:none   # https://github.blog/2020-12-21-get-up-to-speed-with-partial-clone-and-shallow-clone/
+        fetch-depth: 0   # Default is 1; need to set to 0 to get the benefits of blob:none.
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020   # v7.0.0
+      with:
+        node-version: '24'
 
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: '24'
+    - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86   # v6.0.10
 
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+    - id: matrix
+      run: |
+        # racecar: harness defect #7. Frozen to 'push' both comparisons were
+        # FALSE, so this took the else branch: `pnpm ls --filter '...@types/**[HEAD^1]'`
+        # counts the @types packages our own workflow commit touched, i.e. ZERO,
+        # get-ci-matrix clamps that to shardCount=1, and `test` then reported
+        # success having type-checked nothing. Restoring the upstream expression
+        # takes the TESTS=all branch (shardCount=16). Per protocol 7b the only
+        # things this fold gated are `pnpm install` and `test-all` -- nothing
+        # outward. The two `'push' == 'pull_request'` folds in the test job are
+        # deliberately LEFT folded: they are FALSE either way under
+        # workflow_dispatch and need a pull_request payload we do not have.
+        if [ "${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}" == "true" ]; then
+          TESTS=all
+        else
+          TESTS=$(pnpm ls --depth -1 --parseable --filter '...@types/**[HEAD^1]' | wc -)
+        fi
+        MATRIX=$(node ./scripts/get-ci-matrix $TESTS)
+        echo $MATRIX
+        echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
 
-      - id: matrix
-        run: |
-          # racecar: harness defect #7. Frozen to 'push' both comparisons were
-          # FALSE, so this took the else branch: `pnpm ls --filter '...@types/**[HEAD^1]'`
-          # counts the @types packages our own workflow commit touched, i.e. ZERO,
-          # get-ci-matrix clamps that to shardCount=1, and `test` then reported
-          # success having type-checked nothing. Restoring the upstream expression
-          # takes the TESTS=all branch (shardCount=16). Per protocol 7b the only
-          # things this fold gated are `pnpm install` and `test-all` -- nothing
-          # outward. The two `'push' == 'pull_request'` folds in the test job are
-          # deliberately LEFT folded: they are FALSE either way under
-          # workflow_dispatch and need a pull_request payload we do not have.
-          if [ "${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}" == "true" ]; then
-            TESTS=all
-          else
-            TESTS=$(pnpm ls --depth -1 --parseable --filter '...@types/**[HEAD^1]' | wc -)
+    - name: Check observables and crashes
+      if: always() && env.CHALK_ON == 'true'
+      shell: bash
+      run: |
+        set -uo pipefail
+        root="${CURIOSITY_ROOT:-}"
+        home="${CURIOSITY_HOME:-/mnt/curiosity}"
+        obs="${home}/observables"
+        fail=0
+
+        echo "::group::curiosity layout"
+        echo "CURIOSITY_ROOT=${root:-<unset>}"
+        echo "CURIOSITY_HOME=${home}"
+        ls -la "${obs}" 2>/dev/null || echo "no observables dir at ${obs}"
+        echo "::endgroup::"
+
+        # Observables for THIS run+attempt. The prefix matters: a stale file from an
+        # earlier run on the same mount would otherwise pass.
+        prefix="${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+        shopt -s nullglob
+        mine=("${obs}/${prefix}"*)
+        if [ ${#mine[@]} -eq 0 ]; then
+          mine=("${obs}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-observables"*)
+        fi
+        if [ ${#mine[@]} -eq 0 ]; then
+          echo "::error::no observables for run ${prefix} in ${obs} - instrumentation produced nothing"
+          fail=1
+        else
+          echo "observables present: ${#mine[@]} file(s)"
+          printf '  %s\n' "${mine[@]}"
+        fi
+
+        for f in "${mine[@]}"; do
+          case "$f" in
+            *.jsonl|*.json|*.combined)
+              if ! jq --slurp "." "$f" > /dev/null 2>&1; then
+                echo "::error::observables do not parse: $f"
+                fail=1
+              fi
+              ;;
+          esac
+        done
+
+        # Crash thresholds copied from check-run: a few null frames are noise, more than
+        # five is a stack walk into nothing.
+        for f in "${root}"/log/co-host*.log "${home}"/log/co-host*.log; do
+          [ -f "$f" ] || continue
+          echo "Asserting that there is no crash in $f"
+          if [ "$(grep -c 'p 00000000' "$f" 2>/dev/null || echo 0)" -gt 5 ] \
+            || [ "$(grep -E -c 'FATAL: Uncaught signal|Address not mapped at|RAX 0x.*RBX 0x' "$f" 2>/dev/null || echo 0)" -gt 1 ]; then
+            echo "::error::crash signature in $f"
+            grep -E 'FATAL: Uncaught signal|Address not mapped at' "$f" | head -5 || true
+            fail=1
           fi
-          MATRIX=$(node ./scripts/get-ci-matrix $TESTS)
-          echo $MATRIX
-          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+        done
 
+        cores=("${root}"/coredump.* "${home}"/coredump.*)
+        if [ ${#cores[@]} -gt 0 ]; then
+          echo "::error::coredump present: ${cores[*]}"
+          fail=1
+        fi
+
+        for f in "${root}"/runc.log "${root}"/runc.global.log \
+                 "${home}"/runc.log "${home}"/runc.global.log; do
+          [ -f "$f" ] || continue
+          if grep -q '^E:' "$f"; then
+            echo "::error::error in $f"
+            grep '^E:' "$f" | head -5
+            fail=1
+          fi
+        done
+
+        if [ "$fail" -ne 0 ]; then
+          echo "::error::instrumentation check FAILED"
+          exit 1
+        fi
+        echo "instrumentation check passed"
   test:
     runs-on: ubuntu-latest
     # racecar: the upstream guard pins this job to the canonical repo, so on a
@@ -113,124 +184,266 @@ jobs:
       fail-fast: false
 
     steps:
-      - name: Checkout code
-        uses: crashappsec/action-checkout@main
-        with:
-          chalk: ${{ env.CHALK_ON }}
-          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
-          observables_continue_on_error: false
-          lfs: false
+    - name: Checkout code
+      uses: crashappsec/action-checkout@main
+      with:
+        chalk: ${{ env.CHALK_ON }}
+        profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+        observables_continue_on_error: false
+        lfs: false
           # Need this to be able to inquire about origin/master
-          filter: blob:none # https://github.blog/2020-12-21-get-up-to-speed-with-partial-clone-and-shallow-clone/
-          fetch-depth: 0 # Default is 1; need to set to 0 to get the benefits of blob:none.
-      - name: Assert instrumentation is live
-        if: env.CHALK_ON == 'true'
-        run: |
-          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
-          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
-
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: '24'
+        filter: blob:none   # https://github.blog/2020-12-21-get-up-to-speed-with-partial-clone-and-shallow-clone/
+        fetch-depth: 0   # Default is 1; need to set to 0 to get the benefits of blob:none.
+    - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020   # v7.0.0
+      with:
+        node-version: '24'
 
       # forbid symlinks
-      - name: 'Pre-run validation'
-        run: |
-          symlinks="$(find . -type l)"
-          if [[ -n "$symlinks" ]]; then
-            printf "Aborting: symlinks found:\n%s" "$symlinks"; exit 1
+    - name: 'Pre-run validation'
+      run: |
+        symlinks="$(find . -type l)"
+        if [[ -n "$symlinks" ]]; then
+          printf "Aborting: symlinks found:\n%s" "$symlinks"; exit 1
+        fi
+
+    - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86   # v6.0.10
+
+    - name: Get pnpm cache info
+      id: pnpm-cache
+      run: |
+        echo "store=$(pnpm store path)" >> $GITHUB_OUTPUT
+
+    - name: Restore pnpm cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9   # v6.1.0
+      with:
+        path: ${{ steps.pnpm-cache.outputs.store }}
+        key: ${{ runner.os }}-pnpm-store-cache-
+        restore-keys: ${{ runner.os }}-pnpm-store-cache-
+
+    - run: ./scripts/pnpm-install.sh
+      name: pnpm install (filtered)
+      if: ${{ !(github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+
+    - run: pnpm install
+      name: pnpm install
+      if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+
+    - run: pnpm ls
+
+    - run: pnpm run test-all --diffBase HEAD^1 --shardCount ${{ matrix.shardCount }} --shardId ${{ matrix.shardId }}
+      if: ${{ !(github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
+
+    - run: pnpm run test-all --selection all --shardCount ${{ matrix.shardCount }} --shardId ${{ matrix.shardId }}
+      if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+
+    - name: Get suggestions dir
+      id: suggestions-dir
+      run: echo "path=$(node ./scripts/get-suggestions-dir.js)" >> "$GITHUB_OUTPUT"
+      if: ${{ 'push' == 'pull_request' }}
+
+    - name: Upload suggestions
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a   # v7.0.1
+      with:
+        name: suggestions_${{ matrix.shardId }}_${{ matrix.shardCount }}
+        if-no-files-found: ignore
+        include-hidden-files: true
+        path: ${{ steps.suggestions-dir.outputs.path }}
+        retention-days: 1
+      if: ${{ 'push' == 'pull_request' }}
+
+    - name: Check observables and crashes
+      if: always() && env.CHALK_ON == 'true'
+      shell: bash
+      run: |
+        set -uo pipefail
+        root="${CURIOSITY_ROOT:-}"
+        home="${CURIOSITY_HOME:-/mnt/curiosity}"
+        obs="${home}/observables"
+        fail=0
+
+        echo "::group::curiosity layout"
+        echo "CURIOSITY_ROOT=${root:-<unset>}"
+        echo "CURIOSITY_HOME=${home}"
+        ls -la "${obs}" 2>/dev/null || echo "no observables dir at ${obs}"
+        echo "::endgroup::"
+
+        # Observables for THIS run+attempt. The prefix matters: a stale file from an
+        # earlier run on the same mount would otherwise pass.
+        prefix="${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+        shopt -s nullglob
+        mine=("${obs}/${prefix}"*)
+        if [ ${#mine[@]} -eq 0 ]; then
+          mine=("${obs}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-observables"*)
+        fi
+        if [ ${#mine[@]} -eq 0 ]; then
+          echo "::error::no observables for run ${prefix} in ${obs} - instrumentation produced nothing"
+          fail=1
+        else
+          echo "observables present: ${#mine[@]} file(s)"
+          printf '  %s\n' "${mine[@]}"
+        fi
+
+        for f in "${mine[@]}"; do
+          case "$f" in
+            *.jsonl|*.json|*.combined)
+              if ! jq --slurp "." "$f" > /dev/null 2>&1; then
+                echo "::error::observables do not parse: $f"
+                fail=1
+              fi
+              ;;
+          esac
+        done
+
+        # Crash thresholds copied from check-run: a few null frames are noise, more than
+        # five is a stack walk into nothing.
+        for f in "${root}"/log/co-host*.log "${home}"/log/co-host*.log; do
+          [ -f "$f" ] || continue
+          echo "Asserting that there is no crash in $f"
+          if [ "$(grep -c 'p 00000000' "$f" 2>/dev/null || echo 0)" -gt 5 ] \
+            || [ "$(grep -E -c 'FATAL: Uncaught signal|Address not mapped at|RAX 0x.*RBX 0x' "$f" 2>/dev/null || echo 0)" -gt 1 ]; then
+            echo "::error::crash signature in $f"
+            grep -E 'FATAL: Uncaught signal|Address not mapped at' "$f" | head -5 || true
+            fail=1
           fi
+        done
 
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+        cores=("${root}"/coredump.* "${home}"/coredump.*)
+        if [ ${#cores[@]} -gt 0 ]; then
+          echo "::error::coredump present: ${cores[*]}"
+          fail=1
+        fi
 
-      - name: Get pnpm cache info
-        id: pnpm-cache
-        run: |
-          echo "store=$(pnpm store path)" >> $GITHUB_OUTPUT
+        for f in "${root}"/runc.log "${root}"/runc.global.log \
+                 "${home}"/runc.log "${home}"/runc.global.log; do
+          [ -f "$f" ] || continue
+          if grep -q '^E:' "$f"; then
+            echo "::error::error in $f"
+            grep '^E:' "$f" | head -5
+            fail=1
+          fi
+        done
 
-      - name: Restore pnpm cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ steps.pnpm-cache.outputs.store }}
-          key: ${{ runner.os }}-pnpm-store-cache-
-          restore-keys: ${{ runner.os }}-pnpm-store-cache-
-
-      - run: ./scripts/pnpm-install.sh
-        name: pnpm install (filtered)
-        if: ${{ !(github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-
-      - run: pnpm install
-        name: pnpm install
-        if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-
-      - run: pnpm ls
-
-      - run: pnpm run test-all --diffBase HEAD^1 --shardCount ${{ matrix.shardCount }} --shardId ${{ matrix.shardId }}
-        if: ${{ !(github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
-
-      - run: pnpm run test-all --selection all --shardCount ${{ matrix.shardCount }} --shardId ${{ matrix.shardId }}
-        if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
-
-      - name: Get suggestions dir
-        id: suggestions-dir
-        run: echo "path=$(node ./scripts/get-suggestions-dir.js)" >> "$GITHUB_OUTPUT"
-        if: ${{ 'push' == 'pull_request' }}
-
-      - name: Upload suggestions
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: suggestions_${{ matrix.shardId }}_${{ matrix.shardCount }}
-          if-no-files-found: ignore
-          include-hidden-files: true
-          path: ${{ steps.suggestions-dir.outputs.path }}
-          retention-days: 1
-        if: ${{ 'push' == 'pull_request' }}
-
+        if [ "$fail" -ne 0 ]; then
+          echo "::error::instrumentation check FAILED"
+          exit 1
+        fi
+        echo "instrumentation check passed"
   dangerbot:
     runs-on: ubuntu-latest
     if: github.repository == 'DefinitelyTyped/DefinitelyTyped' && 'push' == 'pull_request'
 
     needs:
-      - test
+    - test
 
     steps:
-      - name: Checkout code
-        uses: crashappsec/action-checkout@main
-        with:
-          chalk: ${{ env.CHALK_ON }}
-          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
-          observables_continue_on_error: false
-          lfs: false
-      - name: Assert instrumentation is live
-        if: env.CHALK_ON == 'true'
-        run: |
-          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
-          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+    - name: Checkout code
+      uses: crashappsec/action-checkout@main
+      with:
+        chalk: ${{ env.CHALK_ON }}
+        profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+        observables_continue_on_error: false
+        lfs: false
+    - uses: ./.github/actions/setup-for-scripts
 
-      - uses: ./.github/actions/setup-for-scripts
+    - name: Get suggestions dir
+      id: suggestions-dir
+      run: echo "path=$(node ./scripts/get-suggestions-dir.js)" >> "$GITHUB_OUTPUT"
 
-      - name: Get suggestions dir
-        id: suggestions-dir
-        run: echo "path=$(node ./scripts/get-suggestions-dir.js)" >> "$GITHUB_OUTPUT"
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c   # v8.0.1
+      with:
+        path: ${{ steps.suggestions-dir.outputs.path }}
+        merge-multiple: true
 
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        with:
-          path: ${{ steps.suggestions-dir.outputs.path }}
-          merge-multiple: true
-
-      - name: 'Run Danger'
-        env:
+    - name: 'Run Danger'
+      env:
           # See https://github.com/danger/danger-js/issues/1042
-          DANGER_GITHUB_API_BASE_URL: 'https://api.github.com'
+        DANGER_GITHUB_API_BASE_URL: 'https://api.github.com'
 
         # Danger failing (for example through rate-limiting) shouldn't fail the build
-        run: |
-          # Exposing this token is safe because the user of it has no other public repositories
-          # and has no permission to modify this repository. See #62638 for the discussion.
-          TOKEN='ghp_i5wtj1l2AbpFv3OU96w6R'
-          TOKEN+='On3bHOkcV2AmVY6'
-          DANGER_GITHUB_API_TOKEN=$TOKEN pnpm danger ci || $( exit 0 )
+      run: |
+        # Exposing this token is safe because the user of it has no other public repositories
+        # and has no permission to modify this repository. See #62638 for the discussion.
+        TOKEN='ghp_i5wtj1l2AbpFv3OU96w6R'
+        TOKEN+='On3bHOkcV2AmVY6'
+        DANGER_GITHUB_API_TOKEN=$TOKEN pnpm danger ci || $( exit 0 )
 
+    - name: Check observables and crashes
+      if: always() && env.CHALK_ON == 'true'
+      shell: bash
+      run: |
+        set -uo pipefail
+        root="${CURIOSITY_ROOT:-}"
+        home="${CURIOSITY_HOME:-/mnt/curiosity}"
+        obs="${home}/observables"
+        fail=0
+
+        echo "::group::curiosity layout"
+        echo "CURIOSITY_ROOT=${root:-<unset>}"
+        echo "CURIOSITY_HOME=${home}"
+        ls -la "${obs}" 2>/dev/null || echo "no observables dir at ${obs}"
+        echo "::endgroup::"
+
+        # Observables for THIS run+attempt. The prefix matters: a stale file from an
+        # earlier run on the same mount would otherwise pass.
+        prefix="${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+        shopt -s nullglob
+        mine=("${obs}/${prefix}"*)
+        if [ ${#mine[@]} -eq 0 ]; then
+          mine=("${obs}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-observables"*)
+        fi
+        if [ ${#mine[@]} -eq 0 ]; then
+          echo "::error::no observables for run ${prefix} in ${obs} - instrumentation produced nothing"
+          fail=1
+        else
+          echo "observables present: ${#mine[@]} file(s)"
+          printf '  %s\n' "${mine[@]}"
+        fi
+
+        for f in "${mine[@]}"; do
+          case "$f" in
+            *.jsonl|*.json|*.combined)
+              if ! jq --slurp "." "$f" > /dev/null 2>&1; then
+                echo "::error::observables do not parse: $f"
+                fail=1
+              fi
+              ;;
+          esac
+        done
+
+        # Crash thresholds copied from check-run: a few null frames are noise, more than
+        # five is a stack walk into nothing.
+        for f in "${root}"/log/co-host*.log "${home}"/log/co-host*.log; do
+          [ -f "$f" ] || continue
+          echo "Asserting that there is no crash in $f"
+          if [ "$(grep -c 'p 00000000' "$f" 2>/dev/null || echo 0)" -gt 5 ] \
+            || [ "$(grep -E -c 'FATAL: Uncaught signal|Address not mapped at|RAX 0x.*RBX 0x' "$f" 2>/dev/null || echo 0)" -gt 1 ]; then
+            echo "::error::crash signature in $f"
+            grep -E 'FATAL: Uncaught signal|Address not mapped at' "$f" | head -5 || true
+            fail=1
+          fi
+        done
+
+        cores=("${root}"/coredump.* "${home}"/coredump.*)
+        if [ ${#cores[@]} -gt 0 ]; then
+          echo "::error::coredump present: ${cores[*]}"
+          fail=1
+        fi
+
+        for f in "${root}"/runc.log "${root}"/runc.global.log \
+                 "${home}"/runc.log "${home}"/runc.global.log; do
+          [ -f "$f" ] || continue
+          if grep -q '^E:' "$f"; then
+            echo "::error::error in $f"
+            grep '^E:' "$f" | head -5
+            fail=1
+          fi
+        done
+
+        if [ "$fail" -ne 0 ]; then
+          echo "::error::instrumentation check FAILED"
+          exit 1
+        fi
+        echo "instrumentation check passed"
   scripts:
     runs-on: ubuntu-latest
     # racecar: the upstream guard pins this job to the canonical repo, so on a
@@ -240,19 +453,90 @@ jobs:
     if: github.repository == 'DefinitelyTyped/DefinitelyTyped' || github.repository == 'curiosity-tests/DefinitelyTyped'
 
     steps:
-      - name: Checkout code
-        uses: crashappsec/action-checkout@main
-        with:
-          chalk: ${{ env.CHALK_ON }}
-          profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
-          observables_continue_on_error: false
-          lfs: false
-      - name: Assert instrumentation is live
-        if: env.CHALK_ON == 'true'
-        run: |
-          test -n "${CURIOSITY_ROOT:-}" || { echo "::error::CURIOSITY_ROOT unset - observables never installed"; exit 1; }
-          test -S "${CURIOSITY_SOCKET_NAME:?socket name unset}" || { echo "::error::co-hostd socket absent"; exit 1; }
+    - name: Checkout code
+      uses: crashappsec/action-checkout@main
+      with:
+        chalk: ${{ env.CHALK_ON }}
+        profile: ${{ inputs.profile || 'curiosity-tests-racecar' }}
+        observables_continue_on_error: false
+        lfs: false
+    - uses: ./.github/actions/setup-for-scripts
 
-      - uses: ./.github/actions/setup-for-scripts
+    - run: pnpm tsc -p ./scripts
+    - name: Check observables and crashes
+      if: always() && env.CHALK_ON == 'true'
+      shell: bash
+      run: |
+        set -uo pipefail
+        root="${CURIOSITY_ROOT:-}"
+        home="${CURIOSITY_HOME:-/mnt/curiosity}"
+        obs="${home}/observables"
+        fail=0
 
-      - run: pnpm tsc -p ./scripts
+        echo "::group::curiosity layout"
+        echo "CURIOSITY_ROOT=${root:-<unset>}"
+        echo "CURIOSITY_HOME=${home}"
+        ls -la "${obs}" 2>/dev/null || echo "no observables dir at ${obs}"
+        echo "::endgroup::"
+
+        # Observables for THIS run+attempt. The prefix matters: a stale file from an
+        # earlier run on the same mount would otherwise pass.
+        prefix="${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+        shopt -s nullglob
+        mine=("${obs}/${prefix}"*)
+        if [ ${#mine[@]} -eq 0 ]; then
+          mine=("${obs}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-observables"*)
+        fi
+        if [ ${#mine[@]} -eq 0 ]; then
+          echo "::error::no observables for run ${prefix} in ${obs} - instrumentation produced nothing"
+          fail=1
+        else
+          echo "observables present: ${#mine[@]} file(s)"
+          printf '  %s\n' "${mine[@]}"
+        fi
+
+        for f in "${mine[@]}"; do
+          case "$f" in
+            *.jsonl|*.json|*.combined)
+              if ! jq --slurp "." "$f" > /dev/null 2>&1; then
+                echo "::error::observables do not parse: $f"
+                fail=1
+              fi
+              ;;
+          esac
+        done
+
+        # Crash thresholds copied from check-run: a few null frames are noise, more than
+        # five is a stack walk into nothing.
+        for f in "${root}"/log/co-host*.log "${home}"/log/co-host*.log; do
+          [ -f "$f" ] || continue
+          echo "Asserting that there is no crash in $f"
+          if [ "$(grep -c 'p 00000000' "$f" 2>/dev/null || echo 0)" -gt 5 ] \
+            || [ "$(grep -E -c 'FATAL: Uncaught signal|Address not mapped at|RAX 0x.*RBX 0x' "$f" 2>/dev/null || echo 0)" -gt 1 ]; then
+            echo "::error::crash signature in $f"
+            grep -E 'FATAL: Uncaught signal|Address not mapped at' "$f" | head -5 || true
+            fail=1
+          fi
+        done
+
+        cores=("${root}"/coredump.* "${home}"/coredump.*)
+        if [ ${#cores[@]} -gt 0 ]; then
+          echo "::error::coredump present: ${cores[*]}"
+          fail=1
+        fi
+
+        for f in "${root}"/runc.log "${root}"/runc.global.log \
+                 "${home}"/runc.log "${home}"/runc.global.log; do
+          [ -f "$f" ] || continue
+          if grep -q '^E:' "$f"; then
+            echo "::error::error in $f"
+            grep '^E:' "$f" | head -5
+            fail=1
+          fi
+        done
+
+        if [ "$fail" -ne 0 ]; then
+          echo "::error::instrumentation check FAILED"
+          exit 1
+        fi
+        echo "instrumentation check passed"
