@@ -7,9 +7,6 @@ on:
   pull_request:
     branches:
     - master
-  schedule:
-    # 12PM UTC -> 4AM Pacific
-  - cron: '0 12 * * *'
   workflow_dispatch:
     inputs:
       leg:

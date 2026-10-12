@@ -10,9 +10,6 @@ on:
   # Manually, when TypeScript is released
   # https://docs.github.com/en/actions/managing-workflow-runs/manually-running-a-workflow
   workflow_dispatch:
-  schedule:
-    # Weekly at 16:00 UTC on Monday
-    - cron: '0 16 * * 1'
 permissions:
   contents: read
 
